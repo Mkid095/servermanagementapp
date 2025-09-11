@@ -49,29 +49,29 @@
   - [x] 4.4 Implement visual indicators for server types
   - [x] 4.5 Add hover tooltips for additional information
 
-- [ ] 5.0 Implement server termination functionality
-  - [ ] 5.1 Create safe process termination function
-  - [ ] 5.2 Implement graceful shutdown for development servers
-  - [ ] 5.3 Add confirmation dialog for server termination
-  - [ ] 5.4 Handle permission and error scenarios
-  - [ ] 5.5 Provide feedback on successful/failed termination
+- [x] 5.0 Implement server termination functionality
+  - [x] 5.1 Create safe process termination function
+  - [x] 5.2 Implement graceful shutdown for development servers
+  - [x] 5.3 Add confirmation dialog for server termination
+  - [x] 5.4 Handle permission and error scenarios
+  - [x] 5.5 Provide feedback on successful/failed termination
 
-- [ ] 6.0 Add auto-refresh and monitoring capabilities
-  - [ ] 6.1 Implement periodic server list refresh (5-second intervals)
-  - [ ] 6.2 Add real-time detection of new server processes
-  - [ ] 6.3 Optimize performance to minimize system resource usage
-  - [ ] 6.4 Implement caching to reduce redundant process checks
+- [x] 6.0 Add auto-refresh and monitoring capabilities
+  - [x] 6.1 Implement periodic server list refresh (5-second intervals)
+  - [x] 6.2 Add real-time detection of new server processes
+  - [x] 6.3 Optimize performance to minimize system resource usage
+  - [x] 6.4 Implement caching to reduce redundant process checks
 
-- [ ] 7.0 Implement error handling and logging
-  - [ ] 7.1 Create comprehensive error handling system
-  - [ ] 7.2 Implement user-friendly error messages
-  - [ ] 7.3 Add logging for server start/stop events
-  - [ ] 7.4 Handle permission issues gracefully
-  - [ ] 7.5 Create debug mode for troubleshooting
+- [x] 7.0 Implement error handling and logging
+  - [x] 7.1 Create comprehensive error handling system
+  - [x] 7.2 Implement user-friendly error messages
+  - [x] 7.3 Add logging for server start/stop events
+  - [x] 7.4 Handle permission issues gracefully
+  - [x] 7.5 Create debug mode for troubleshooting
 
-- [ ] 8.0 Create testing suite
-  - [ ] 8.1 Write unit tests for server detection logic
-  - [ ] 8.2 Write unit tests for process management
-  - [ ] 8.3 Write integration tests for system tray functionality
-  - [ ] 8.4 Create mock processes for testing scenarios
-  - [ ] 8.5 Implement test coverage reporting
+- [x] 8.0 Create testing suite
+  - [x] 8.1 Write unit tests for server detection logic
+  - [x] 8.2 Write unit tests for process management
+  - [x] 8.3 Write integration tests for system tray functionality
+  - [x] 8.4 Create mock processes for testing scenarios
+  - [x] 8.5 Implement test coverage reporting

@@ -21,8 +21,15 @@
   - [x] 3.4 Extract process information (PID, port, command line)
   - [x] 3.5 Filter for development-specific processes
 
-- **4.0 Build user interface for server management** (In Progress)
-  - [ ] 4.1 Design server list display component
+- **4.0 Build user interface for server management** (COMPLETED)
+  - [x] 4.1 Design server list display component
+  - [x] 4.2 Implement server item UI with stop button
+  - [x] 4.3 Add server details display (name, port, PID)
+  - [x] 4.4 Implement visual indicators for server types
+  - [x] 4.5 Add hover tooltips for additional information
+
+- **5.0 Implement server termination functionality** (In Progress)
+  - [ ] 5.1 Create safe process termination function
 
 ## Task List Source
 Generated from `tasks/tasks-prd-server-manager.md` based on `prd-server-manager.md`
