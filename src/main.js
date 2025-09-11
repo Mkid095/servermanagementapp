@@ -2,6 +2,8 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const log = require('electron-log');
 const TrayMenu = require('./components/TrayMenu');
+const ServerDetector = require('./services/serverDetector');
+const ProcessManager = require('./services/processManager');
 const appConfig = require('./config/appConfig');
 
 class ServerManagerApp {
@@ -10,6 +12,10 @@ class ServerManagerApp {
     this.trayMenu = null;
     this.isQuitting = false;
     this.serverCheckInterval = null;
+    
+    // Initialize services
+    this.serverDetector = new ServerDetector();
+    this.processManager = new ProcessManager();
     
     log.initialize({ preload: true });
     log.info('Server Manager starting...');
@@ -83,7 +89,7 @@ class ServerManagerApp {
   }
 
   createTray() {
-    this.trayMenu = new TrayMenu(this.mainWindow);
+    this.trayMenu = new TrayMenu(this.mainWindow, this.processManager);
     this.trayMenu.init();
   }
 
@@ -106,13 +112,53 @@ class ServerManagerApp {
 
     // IPC handlers for server management
     ipcMain.handle('get-servers', async () => {
-      // This will be implemented in the server detection service
-      return [];
+      try {
+        const servers = await this.serverDetector.detectServers();
+        return servers;
+      } catch (error) {
+        log.error('Error getting servers:', error);
+        return [];
+      }
     });
 
     ipcMain.handle('stop-server', async (event, serverId) => {
-      // This will be implemented in the process manager service
-      return { success: true };
+      try {
+        const result = await this.processManager.stopServer(serverId);
+        return result;
+      } catch (error) {
+        log.error('Error stopping server:', error);
+        return { 
+          success: false, 
+          error: error.message || 'Unknown error occurred' 
+        };
+      }
+    });
+
+    // Additional IPC handlers
+    ipcMain.handle('get-process-details', async (event, pid) => {
+      try {
+        return await this.processManager.getProcessTree(pid);
+      } catch (error) {
+        log.error('Error getting process details:', error);
+        return null;
+      }
+    });
+
+    ipcMain.handle('refresh-servers', async () => {
+      try {
+        this.serverDetector.clearCache();
+        const servers = await this.serverDetector.detectServers();
+        
+        // Notify tray menu about server updates
+        if (this.trayMenu) {
+          this.trayMenu.updateMenu();
+        }
+        
+        return servers;
+      } catch (error) {
+        log.error('Error refreshing servers:', error);
+        return [];
+      }
     });
 
     // Handle server updates from renderer

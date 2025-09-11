@@ -35,12 +35,12 @@
   - [x] 2.3 Add tray icon visibility and hide/show functionality
   - [x] 2.4 Configure tray behavior on application start/quit
 
-- [ ] 3.0 Create server detection system
-  - [ ] 3.1 Implement Windows process detection using tasklist/netstat
-  - [ ] 3.2 Create logic to identify Node.js processes
-  - [ ] 3.3 Create logic to identify React development servers
-  - [ ] 3.4 Extract process information (PID, port, command line)
-  - [ ] 3.5 Filter for development-specific processes
+- [x] 3.0 Create server detection system
+  - [x] 3.1 Implement Windows process detection using tasklist/netstat
+  - [x] 3.2 Create logic to identify Node.js processes
+  - [x] 3.3 Create logic to identify React development servers
+  - [x] 3.4 Extract process information (PID, port, command line)
+  - [x] 3.5 Filter for development-specific processes
 
 - [ ] 4.0 Build user interface for server management
   - [ ] 4.1 Design server list display component
