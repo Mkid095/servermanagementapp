@@ -1,11 +1,13 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const log = require('electron-log');
+const TrayMenu = require('./components/TrayMenu');
+const appConfig = require('./config/appConfig');
 
 class ServerManagerApp {
   constructor() {
     this.mainWindow = null;
-    this.tray = null;
+    this.trayMenu = null;
     this.isQuitting = false;
     this.serverCheckInterval = null;
     
@@ -39,14 +41,16 @@ class ServerManagerApp {
 
   createWindow() {
     this.mainWindow = new BrowserWindow({
-      width: 800,
-      height: 600,
+      width: appConfig.windowWidth,
+      height: appConfig.windowHeight,
       show: false,
       webPreferences: {
         nodeIntegration: true,
         contextIsolation: false,
         enableRemoteModule: true
-      }
+      },
+      autoHideMenuBar: appConfig.autoHideMenuBar,
+      icon: path.join(__dirname, '..', 'assets', 'icon.png')
     });
 
     // Load the renderer
@@ -58,65 +62,35 @@ class ServerManagerApp {
       this.mainWindow.hide();
     });
 
-    // Quit when window is closed
+    // Handle window close (don't quit, just hide)
+    this.mainWindow.on('close', (event) => {
+      if (!this.isQuitting) {
+        event.preventDefault();
+        this.mainWindow.hide();
+      }
+    });
+
+    // Quit when window is actually closed
     this.mainWindow.on('closed', () => {
       this.mainWindow = null;
     });
+
+    // Show window when ready (for development)
+    if (process.argv.includes('--dev')) {
+      this.mainWindow.show();
+      this.mainWindow.webContents.openDevTools();
+    }
   }
 
   createTray() {
-    const iconPath = path.join(__dirname, '..', 'assets', 'icon.png');
-    
-    this.tray = new Tray(iconPath);
-    
-    const contextMenu = Menu.buildFromTemplate([
-      {
-        label: 'Show Server Manager',
-        click: () => {
-          if (this.mainWindow) {
-            this.mainWindow.show();
-            this.mainWindow.focus();
-          }
-        }
-      },
-      {
-        label: 'Hide Server Manager',
-        click: () => {
-          if (this.mainWindow) {
-            this.mainWindow.hide();
-          }
-        }
-      },
-      { type: 'separator' },
-      {
-        label: 'Quit',
-        click: () => {
-          this.isQuitting = true;
-          app.quit();
-        }
-      }
-    ]);
-
-    this.tray.setToolTip('Server Manager');
-    this.tray.setContextMenu(contextMenu);
-
-    // Double-click to show/hide
-    this.tray.on('double-click', () => {
-      if (this.mainWindow) {
-        if (this.mainWindow.isVisible()) {
-          this.mainWindow.hide();
-        } else {
-          this.mainWindow.show();
-          this.mainWindow.focus();
-        }
-      }
-    });
+    this.trayMenu = new TrayMenu(this.mainWindow);
+    this.trayMenu.init();
   }
 
   setupEventHandlers() {
     app.on('window-all-closed', () => {
       if (process.platform !== 'darwin') {
-        app.quit();
+        this.quit();
       }
     });
 
@@ -140,6 +114,28 @@ class ServerManagerApp {
       // This will be implemented in the process manager service
       return { success: true };
     });
+
+    // Handle server updates from renderer
+    ipcMain.on('servers-updated', (event, servers) => {
+      if (this.trayMenu) {
+        this.trayMenu.updateMenu();
+      }
+    });
+  }
+
+  quit() {
+    this.isQuitting = true;
+    
+    // Clean up resources
+    if (this.serverCheckInterval) {
+      clearInterval(this.serverCheckInterval);
+    }
+    
+    if (this.trayMenu) {
+      this.trayMenu.destroy();
+    }
+    
+    app.quit();
   }
 }
 
