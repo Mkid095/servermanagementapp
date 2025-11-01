@@ -1,15 +1,19 @@
-const { exec, execSync } = require('child_process');
-const { promisify } = require('util');
-const log = require('electron-log');
-const appConfig = require('../config/appConfig');
+/**
+ * Server Detector Service
+ * Main coordinator for server detection operations
+ * Refactored to use modular components
+ */
 
-const execAsync = promisify(exec);
+const DetectionLogic = require('./DetectionLogic');
+const ProcessClassifier = require('./ProcessClassifier');
+const NetworkUtilities = require('./NetworkUtilities');
 
 class ServerDetector {
   constructor() {
-    this.cachedServers = [];
-    this.lastCheckTime = 0;
-    this.cacheDuration = 3000; // 3 seconds cache
+    // Initialize modules
+    this.networkUtils = new NetworkUtilities();
+    this.processClassifier = new ProcessClassifier();
+    this.detectionLogic = new DetectionLogic(this.networkUtils, this.processClassifier);
   }
 
   /**
@@ -17,341 +21,7 @@ class ServerDetector {
    * @returns {Promise<Array>} Array of server objects
    */
   async detectServers() {
-    const now = Date.now();
-    
-    // Return cached results if cache is still valid
-    if (this.cachedServers.length > 0 && (now - this.lastCheckTime) < this.cacheDuration) {
-      return this.cachedServers;
-    }
-
-    try {
-      // Get all processes and network connections
-      const [processes, connections] = await Promise.all([
-        this.getRunningProcesses(),
-        this.getNetworkConnections()
-      ]);
-
-      // Map port to process information
-      const portToProcess = this.mapPortToProcess(connections, processes);
-
-      // Identify development servers
-      const servers = this.identifyDevelopmentServers(processes, portToProcess);
-
-      // Update cache
-      this.cachedServers = servers;
-      this.lastCheckTime = now;
-
-      log.info(`Detected ${servers.length} development servers`);
-      return servers;
-
-    } catch (error) {
-      log.error('Error detecting servers:', error);
-      // Return cached servers if available, otherwise empty array
-      return this.cachedServers.length > 0 ? this.cachedServers : [];
-    }
-  }
-
-  /**
-   * Get all running processes using tasklist
-   * @returns {Promise<Array>} Array of process objects
-   */
-  async getRunningProcesses() {
-    try {
-      // Use tasklist command to get process information
-      const { stdout } = await execAsync('tasklist /fo csv /nh');
-      
-      return this.parseTasklistOutput(stdout);
-    } catch (error) {
-      log.error('Error getting process list:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Get network connections using netstat
-   * @returns {Promise<Array>} Array of connection objects
-   */
-  async getNetworkConnections() {
-    try {
-      // Use netstat to get listening ports
-      const { stdout } = await execAsync('netstat -ano -p tcp');
-      
-      return this.parseNetstatOutput(stdout);
-    } catch (error) {
-      log.error('Error getting network connections:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Parse tasklist CSV output
-   * @param {string} output - Raw tasklist output
-   * @returns {Array} Array of process objects
-   */
-  parseTasklistOutput(output) {
-    const processes = [];
-    const lines = output.split('\n').filter(line => line.trim());
-
-    for (const line of lines) {
-      try {
-        // Parse CSV format: "Image Name","PID","Session Name","Session#","Mem Usage"
-        const parts = line.match(/"([^"]*)"/g);
-        if (parts && parts.length >= 2) {
-          const imageName = parts[0].replace(/"/g, '');
-          const pid = parseInt(parts[1].replace(/"/g, ''), 10);
-          
-          if (!isNaN(pid) && imageName) {
-            processes.push({
-              pid,
-              name: imageName,
-              command: imageName
-            });
-          }
-        }
-      } catch (error) {
-        log.warn('Error parsing process line:', line, error);
-      }
-    }
-
-    return processes;
-  }
-
-  /**
-   * Parse netstat output
-   * @param {string} output - Raw netstat output
-   * @returns {Array} Array of connection objects
-   */
-  parseNetstatOutput(output) {
-    const connections = [];
-    const lines = output.split('\n').filter(line => line.trim());
-
-    for (const line of lines) {
-      try {
-        // Skip header lines and empty lines
-        if (line.includes('Proto') || line.includes('Local Address') || line.trim() === '') {
-          continue;
-        }
-
-        // Parse line: TCP    0.0.0.0:3000           0.0.0.0:0              LISTENING       1234
-        const parts = line.trim().split(/\s+/);
-        if (parts.length >= 4) {
-          const protocol = parts[0];
-          const localAddress = parts[1];
-          const state = parts[3];
-          const pid = parseInt(parts[4], 10);
-
-          if (protocol === 'TCP' && state === 'LISTENING' && !isNaN(pid)) {
-            const portMatch = localAddress.match(/:(\d+)$/);
-            if (portMatch) {
-              const port = parseInt(portMatch[1], 10);
-              connections.push({
-                protocol,
-                localAddress,
-                port,
-                state,
-                pid
-              });
-            }
-          }
-        }
-      } catch (error) {
-        log.warn('Error parsing connection line:', line, error);
-      }
-    }
-
-    return connections;
-  }
-
-  /**
-   * Map ports to process information
-   * @param {Array} connections - Network connections
-   * @param {Array} processes - Running processes
-   * @returns {Object} Map of port to process info
-   */
-  mapPortToProcess(connections, processes) {
-    const portToProcess = {};
-    
-    // Create PID to process map
-    const pidToProcess = {};
-    processes.forEach(process => {
-      pidToProcess[process.pid] = process;
-    });
-
-    // Map each connection to its process
-    connections.forEach(connection => {
-      if (connection.pid && pidToProcess[connection.pid]) {
-        portToProcess[connection.port] = {
-          ...pidToProcess[connection.pid],
-          port: connection.port,
-          protocol: connection.protocol,
-          localAddress: connection.localAddress
-        };
-      }
-    });
-
-    return portToProcess;
-  }
-
-  /**
-   * Identify development servers from processes and port mappings
-   * @param {Array} processes - All running processes
-   * @param {Object} portToProcess - Port to process mapping
-   * @returns {Array} Array of development server objects
-   */
-  identifyDevelopmentServers(processes, portToProcess) {
-    const servers = [];
-    const processedPids = new Set();
-
-    // Check processes with open ports first
-    Object.values(portToProcess).forEach(processInfo => {
-      if (processedPids.has(processInfo.pid)) return;
-
-      const server = this.classifyServer(processInfo);
-      if (server) {
-        servers.push(server);
-        processedPids.add(processInfo.pid);
-      }
-    });
-
-    // Check other processes that might be development servers
-    processes.forEach(process => {
-      if (processedPids.has(process.pid)) return;
-
-      const server = this.classifyServer(process);
-      if (server) {
-        servers.push(server);
-        processedPids.add(process.pid);
-      }
-    });
-
-    return servers;
-  }
-
-  /**
-   * Classify a process as a development server
-   * @param {Object} processInfo - Process information
-   * @returns {Object|null} Server object or null if not a dev server
-   */
-  classifyServer(processInfo) {
-    const { name, command, port } = processInfo;
-    
-    // Filter out system processes first
-    if (this.isSystemProcess(processInfo)) {
-      return null;
-    }
-    
-    // Check if it's a development server based on process name and command
-    const patterns = appConfig.processPatterns;
-    
-    // Node.js processes
-    if (name.toLowerCase().includes('node.exe') || name.toLowerCase().includes('node')) {
-      let serverType = 'node';
-      let serverName = 'Node.js Server';
-
-      // Check for specific Node.js frameworks
-      if (command) {
-        const cmd = command.toLowerCase();
-        
-        if (cmd.includes('react-scripts') || cmd.includes('start')) {
-          serverType = 'react';
-          serverName = 'React Dev Server';
-        } else if (cmd.includes('next')) {
-          serverType = 'react';
-          serverName = 'Next.js Server';
-        } else if (cmd.includes('nuxt')) {
-          serverType = 'react';
-          serverName = 'Nuxt.js Server';
-        } else if (cmd.includes('vite')) {
-          serverType = 'react';
-          serverName = 'Vite Dev Server';
-        } else if (cmd.includes('nodemon') || cmd.includes('ts-node') || cmd.includes('express')) {
-          serverType = 'node';
-          serverName = 'Express/Node Server';
-        }
-      }
-
-      const actualPort = port || this.extractPortFromCommand(command);
-      const url = actualPort && actualPort !== 'Unknown' ? `http://localhost:${actualPort}` : null;
-      
-      return {
-        pid: processInfo.pid,
-        name: serverName,
-        type: serverType,
-        port: actualPort || 'Unknown',
-        url: url,
-        command: command || name,
-        path: processInfo.path || '',
-        startTime: processInfo.startTime || new Date(),
-        category: this.getServerCategory(serverType)
-      };
-    }
-
-    // Python processes
-    if (name.toLowerCase().includes('python.exe') || name.toLowerCase().includes('python')) {
-      // Check if it's a web server (running on typical web ports)
-      if (port && this.isWebPort(port)) {
-        const actualPort = port || this.extractPortFromCommand(command);
-        const url = actualPort && actualPort !== 'Unknown' ? `http://localhost:${actualPort}` : null;
-      
-      return {
-        pid: processInfo.pid,
-        name: 'Python Web Server',
-        type: 'python',
-        port: actualPort || 'Unknown',
-        url: url,
-        command: command || name,
-        path: processInfo.path || '',
-        startTime: processInfo.startTime || new Date(),
-        category: this.getServerCategory('python')
-      };
-      }
-    }
-
-    // Other potential development servers
-    if (command) {
-      const cmd = command.toLowerCase();
-      
-      // Check for other development server patterns
-      if (cmd.includes('http-server') || cmd.includes('serve') || cmd.includes('live-server')) {
-        const actualPort = port || this.extractPortFromCommand(command);
-        const url = actualPort && actualPort !== 'Unknown' ? `http://localhost:${actualPort}` : null;
-      
-      return {
-        pid: processInfo.pid,
-        name: 'Static File Server',
-        type: 'static',
-        port: actualPort || 'Unknown',
-        url: url,
-        command: command,
-        path: processInfo.path || '',
-        startTime: processInfo.startTime || new Date(),
-        category: this.getServerCategory('static')
-      };
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * Check if a port is a typical web development port
-   * @param {number} port - Port number
-   * @returns {boolean} True if it's a web port
-   */
-  isWebPort(port) {
-    return appConfig.defaultPorts.includes(port) || 
-           (port >= 3000 && port <= 3010) ||  // React/Vue/Next
-           (port >= 8000 && port <= 8010) ||  // Django/Flask
-           (port >= 5000 && port <= 5010) ||  // Flask/Express
-           (port >= 9000 && port <= 9010);   // Additional dev ports
-  }
-
-  /**
-   * Clear the server cache
-   */
-  clearCache() {
-    this.cachedServers = [];
-    this.lastCheckTime = 0;
+    return await this.detectionLogic.detectServers();
   }
 
   /**
@@ -360,129 +30,299 @@ class ServerDetector {
    * @returns {Promise<Object>} Process details
    */
   async getProcessDetails(pid) {
+    return await this.detectionLogic.getProcessDetails(pid);
+  }
+
+  /**
+   * Clear the server cache
+   */
+  clearCache() {
+    this.detectionLogic.clearCache();
+  }
+
+  /**
+   * Force refresh server detection
+   * @returns {Promise<Array>} Array of server objects
+   */
+  async forceRefresh() {
+    return await this.detectionLogic.forceRefresh();
+  }
+
+  /**
+   * Get cache statistics
+   * @returns {Object} Cache statistics
+   */
+  getCacheStats() {
+    return this.detectionLogic.getCacheStats();
+  }
+
+  /**
+   * Update cache duration
+   * @param {number} duration - New cache duration in milliseconds
+   */
+  updateCacheDuration(duration) {
+    this.detectionLogic.updateCacheDuration(duration);
+  }
+
+  /**
+   * Get server by PID from cache
+   * @param {number} pid - Process ID
+   * @returns {Object|null} Server object or null
+   */
+  getServerByPid(pid) {
+    return this.detectionLogic.getServerByPid(pid);
+  }
+
+  /**
+   * Get servers by type from cache
+   * @param {string} type - Server type
+   * @returns {Array} Array of server objects
+   */
+  getServersByType(type) {
+    return this.detectionLogic.getServersByType(type);
+  }
+
+  /**
+   * Get servers by port from cache
+   * @param {number} port - Port number
+   * @returns {Array} Array of server objects
+   */
+  getServersByPort(port) {
+    return this.detectionLogic.getServersByPort(port);
+  }
+
+  /**
+   * Get server statistics from cache
+   * @returns {Object} Server statistics
+   */
+  getServerStats() {
+    return this.detectionLogic.getServerStats();
+  }
+
+  /**
+   * Enhanced server detection with confidence scoring
+   * @returns {Promise<Array>} Array of enhanced server objects
+   */
+  async detectServersEnhanced() {
     try {
-      const { stdout } = await execAsync(`tasklist /fi "PID eq ${pid}" /fo csv /nh`);
-      const processes = this.parseTasklistOutput(stdout);
-      return processes[0] || null;
+      const [processes, connections] = await Promise.all([
+        this.networkUtils.getRunningProcesses(),
+        this.networkUtils.getNetworkConnections()
+      ]);
+
+      // Map port to process information
+      const portToProcess = this.networkUtils.mapPortToProcess(connections, processes);
+
+      // Enhanced classification
+      const servers = [];
+      const processedPids = new Set();
+
+      // Check processes with open ports first
+      Object.values(portToProcess).forEach(processInfo => {
+        if (processedPids.has(processInfo.pid)) return;
+
+        const server = this.processClassifier.classifyServerEnhanced(processInfo);
+        if (server) {
+          servers.push(server);
+          processedPids.add(processInfo.pid);
+        }
+      });
+
+      // Check other processes that might be development servers
+      processes.forEach(process => {
+        if (processedPids.has(process.pid)) return;
+
+        const server = this.processClassifier.classifyServerEnhanced(process);
+        if (server) {
+          servers.push(server);
+          processedPids.add(process.pid);
+        }
+      });
+
+      // Validate and filter servers
+      const validServers = this.detectionLogic.filterValidServers(servers);
+
+      // Update cache
+      this.detectionLogic.cachedServers = validServers;
+      this.detectionLogic.lastCheckTime = Date.now();
+
+      return validServers;
+
     } catch (error) {
-      log.error(`Error getting process details for PID ${pid}:`, error);
-      return null;
+      console.error('Error in enhanced server detection:', error);
+      // Return cached servers if available, otherwise empty array
+      return this.detectionLogic.cachedServers.length > 0 ? this.detectionLogic.cachedServers : [];
     }
   }
 
   /**
-   * Check if a process is a system process that should be ignored
+   * Get all running processes (delegated to network utilities)
+   * @returns {Promise<Array>} Array of process objects
+   */
+  async getRunningProcesses() {
+    return await this.networkUtils.getRunningProcesses();
+  }
+
+  /**
+   * Get network connections (delegated to network utilities)
+   * @returns {Promise<Array>} Array of connection objects
+   */
+  async getNetworkConnections() {
+    return await this.networkUtils.getNetworkConnections();
+  }
+
+  /**
+   * Parse tasklist output (delegated to network utilities)
+   * @param {string} output - Raw tasklist output
+   * @returns {Array} Array of process objects
+   */
+  parseTasklistOutput(output) {
+    return this.networkUtils.parseTasklistOutput(output);
+  }
+
+  /**
+   * Parse netstat output (delegated to network utilities)
+   * @param {string} output - Raw netstat output
+   * @returns {Array} Array of connection objects
+   */
+  parseNetstatOutput(output) {
+    return this.networkUtils.parseNetstatOutput(output);
+  }
+
+  /**
+   * Map ports to process information (delegated to network utilities)
+   * @param {Array} connections - Network connections
+   * @param {Array} processes - Running processes
+   * @returns {Object} Map of port to process info
+   */
+  mapPortToProcess(connections, processes) {
+    return this.networkUtils.mapPortToProcess(connections, processes);
+  }
+
+  /**
+   * Check if a process is a system process (delegated to process classifier)
    * @param {Object} processInfo - Process information
    * @returns {boolean} True if it's a system process
    */
   isSystemProcess(processInfo) {
-    const systemProcessNames = [
-      'svchost.exe',
-      'csrss.exe',
-      'wininit.exe',
-      'services.exe',
-      'lsass.exe',
-      'winlogon.exe',
-      'explorer.exe',
-      'System',
-      'System Idle Process',
-      'Registry',
-      'Memory Compression',
-      'dwm.exe',
-      'conhost.exe',
-      'WmiPrvSE.exe',
-      'SearchIndexer.exe',
-      'spoolsv.exe',
-      'audiodg.exe',
-      'dllhost.exe',
-      'taskhostw.exe',
-      'RuntimeBroker.exe',
-      'WindowsExplorer.exe'
-    ];
-
-    // Check by process name
-    if (systemProcessNames.some(name => 
-      processInfo.name.toLowerCase().includes(name.toLowerCase()))) {
-      return true;
-    }
-
-    // Check by command line patterns
-    const systemPatterns = [
-      /\\Windows\\System32\\/i,
-      /\\Windows\\SysWOW64\\/i,
-      /C:\\Windows\\/i,
-      /SystemRoot\\/i,
-      /\\Microsoft\\/i,
-      /\\Windows Defender\\/i,
-      /\\Windows Security\\/i
-    ];
-
-    if (systemPatterns.some(pattern => pattern.test(processInfo.command || ''))) {
-      return true;
-    }
-
-    // Check if it's running from Windows directories
-    if (processInfo.path && (
-      processInfo.path.toLowerCase().includes('\\windows\\system32\\') ||
-      processInfo.path.toLowerCase().includes('\\windows\\syswow64\\') ||
-      processInfo.path.toLowerCase().includes('\\windows')
-    )) {
-      return true;
-    }
-
-    return false;
+    return this.processClassifier.isSystemProcess(processInfo);
   }
 
   /**
-   * Extract port number from command line
+   * Check if a process is our main app process (delegated to process classifier)
+   * @param {Object} processInfo - Process information
+   * @returns {boolean} True if it's our main app process
+   */
+  isMainAppProcess(processInfo) {
+    return this.processClassifier.isMainAppProcess(processInfo);
+  }
+
+  /**
+   * Extract port from command line (delegated to process classifier)
    * @param {string} commandLine - Process command line
    * @returns {string|null} Port number or null
    */
   extractPortFromCommand(commandLine) {
-    if (!commandLine) return null;
-
-    // Common port patterns
-    const portPatterns = [
-      /--port\s+(\d+)/i,
-      /-p\s+(\d+)/i,
-      /-port\s+(\d+)/i,
-      /port\s*[:=]\s*(\d+)/i,
-      /:(\d+)/i,
-      /localhost:(\d+)/i,
-      /127\.0\.0\.1:(\d+)/i
-    ];
-
-    for (const pattern of portPatterns) {
-      const match = commandLine.match(pattern);
-      if (match && match[1]) {
-        const port = parseInt(match[1]);
-        if (port > 0 && port <= 65535) {
-          return port.toString();
-        }
-      }
-    }
-
-    return null;
+    return this.processClassifier.extractPortFromCommand(commandLine);
   }
 
   /**
-   * Get server category based on type
+   * Check if a port is a web port (delegated to process classifier)
+   * @param {number} port - Port number
+   * @returns {boolean} True if it's a web port
+   */
+  isWebPort(port) {
+    return this.processClassifier.isWebPort(port);
+  }
+
+  /**
+   * Get server category (delegated to process classifier)
    * @param {string} type - Server type
    * @returns {string} Category name
    */
   getServerCategory(type) {
-    const categories = {
-      'react': 'Frontend Frameworks',
-      'node': 'Node.js Applications',
-      'python': 'Python Applications',
-      'next': 'Frontend Frameworks',
-      'nuxt': 'Frontend Frameworks',
-      'vite': 'Build Tools',
-      'webpack': 'Build Tools',
-      'static': 'Static Servers'
-    };
+    return this.processClassifier.getServerCategory(type);
+  }
 
-    return categories[type] || 'Other Development Servers';
+  /**
+   * Classify a server (delegated to process classifier)
+   * @param {Object} processInfo - Process information
+   * @returns {Object|null} Server object or null
+   */
+  classifyServer(processInfo) {
+    return this.processClassifier.classifyServer(processInfo);
+  }
+
+  /**
+   * Get detailed process information (delegated to network utilities)
+   * @param {number} pid - Process ID
+   * @returns {Promise<Object>} Detailed process information
+   */
+  async getDetailedProcessInfo(pid) {
+    return await this.networkUtils.getDetailedProcessInfo(pid);
+  }
+
+  /**
+   * Check if a specific port is in use (delegated to network utilities)
+   * @param {number} port - Port number to check
+   * @returns {Promise<boolean>} True if port is in use
+   */
+  async isPortInUse(port) {
+    return await this.networkUtils.isPortInUse(port);
+  }
+
+  /**
+   * Get all processes using a specific port (delegated to network utilities)
+   * @param {number} port - Port number
+   * @returns {Promise<Array>} Array of processes using the port
+   */
+  async getProcessesByPort(port) {
+    return await this.networkUtils.getProcessesByPort(port);
+  }
+
+  /**
+   * Get all listening ports (delegated to network utilities)
+   * @returns {Promise<Array>} Array of listening ports with process info
+   */
+  async getListeningPorts() {
+    return await this.networkUtils.getListeningPorts();
+  }
+
+  /**
+   * Test network connection (delegated to network utilities)
+   * @param {string} host - Host address
+   * @param {number} port - Port number
+   * @param {number} timeout - Timeout in milliseconds
+   * @returns {Promise<boolean>} True if connection is successful
+   */
+  async testConnection(host, port, timeout = 5000) {
+    return await this.networkUtils.testConnection(host, port, timeout);
+  }
+
+  /**
+   * Get network interfaces (delegated to network utilities)
+   * @returns {Promise<Array>} Array of network interfaces
+   */
+  async getNetworkInterfaces() {
+    return await this.networkUtils.getNetworkInterfaces();
+  }
+
+  /**
+   * Get network statistics (delegated to network utilities)
+   * @returns {Promise<Object>} Network statistics
+   */
+  async getNetworkStats() {
+    return await this.networkUtils.getNetworkStats();
+  }
+
+  /**
+   * Identify development servers (delegated to detection logic)
+   * @param {Array} processes - All running processes
+   * @param {Object} portToProcess - Port to process mapping
+   * @returns {Array} Array of development server objects
+   */
+  identifyDevelopmentServers(processes, portToProcess) {
+    return this.detectionLogic.identifyDevelopmentServers(processes, portToProcess);
   }
 }
 

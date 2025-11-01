@@ -1,4 +1,16 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+// In the main process, we need to use require('electron') differently
+// Try loading electron modules directly
+let app, BrowserWindow, ipcMain;
+
+try {
+  app = require('electron').app || require('electron/main').app;
+  BrowserWindow = require('electron').BrowserWindow || require('electron/main').BrowserWindow;
+  ipcMain = require('electron').ipcMain || require('electron/main').ipcMain;
+} catch (error) {
+  console.error('Error loading Electron modules:', error.message);
+  console.log('Available exports from require("electron"):', require('electron'));
+  process.exit(1);
+}
 const path = require('path');
 const log = require('electron-log');
 const TrayMenu = require('./components/TrayMenu');
@@ -214,6 +226,47 @@ class ServerManagerApp {
     ipcMain.on('servers-updated', (event, servers) => {
       if (this.trayMenu) {
         this.trayMenu.updateMenu();
+      }
+    });
+
+    // IPC handler for stopping all servers and exiting
+    ipcMain.handle('stop-all-servers-and-exit', async (event) => {
+      try {
+        log.info('Stopping all servers and preparing to exit application');
+
+        // Get current server list
+        const servers = await this.serverDetector.detectServers();
+
+        if (servers && servers.length > 0) {
+          // Stop all servers first
+          const result = await this.processManager.stopAllServersAndExit(servers);
+
+          if (!result.success) {
+            log.warn(`Some servers failed to stop: ${result.message}`);
+          } else {
+            log.info(`All servers stopped successfully: ${result.message}`);
+          }
+
+          // Wait a moment for servers to fully terminate
+          await new Promise(resolve => setTimeout(resolve, 2000));
+
+          return result;
+        } else {
+          log.info('No servers to stop, proceeding with exit');
+          return {
+            success: true,
+            message: 'No servers to stop',
+            stoppedCount: 0,
+            failedCount: 0,
+            results: {}
+          };
+        }
+      } catch (error) {
+        log.error('Error in stop-all-servers-and-exit:', error);
+        return {
+          success: false,
+          error: error.message || 'Unknown error occurred while stopping servers'
+        };
       }
     });
   }

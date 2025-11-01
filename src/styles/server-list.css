@@ -711,9 +711,25 @@
   transition: color 0.2s ease;
 }
 
-.server-url:hover {
-  color: #0056b3;
-  text-decoration: underline;
+/* Enhanced Animations and Effects */
+.server-card {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.btn {
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Accessibility Improvements */
+.btn:focus {
+    outline: 2px solid #007bff;
+    outline-offset: 2px;
+}
+
+.btn:focus-visible {
+    outline: 2px solid #007bff;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 8px rgba(0, 123, 255, 0.5);
 }
 
 .detail-value .server-url {

@@ -14,13 +14,14 @@
     "build:clean": "electron-builder --win --x64 --prepackaged",
     "dist": "electron-builder --publish=never",
     "dist:win": "electron-builder --win --publish=never",
-    "pack": "electron-builder --dir",
+    "pack": "electron-packager . --out=dist --overwrite --platform=win32 --arch=x64 --icon=assets/icon.ico --prune=false",
     "release": "electron-builder --win --publish=always",
     "postinstall": "electron-builder install-app-deps",
     "build:portable": "build-portable.bat",
     "build:installer": "build-installer.bat",
     "build:exe": "build-exe.bat",
-    "build:all": "npm run build:portable && npm run build:installer && npm run build:exe"
+    "build:all": "npm run build:portable && npm run build:installer && npm run build:exe",
+    "package:portable": "node create-portable-package.js"
   },
   "keywords": [
     "development",
@@ -37,12 +38,15 @@
     "electron": "^28.3.3",
     "electron-builder": "^24.13.3",
     "electron-log": "^5.4.3",
+    "electron-packager": "^17.1.2",
     "jest": "^29.7.0",
-    "jest-environment-node": "^29.7.0"
+    "jest-environment-node": "^29.7.0",
+    "sharp": "^0.34.4"
   },
   "build": {
     "appId": "com.servermanager.app",
     "productName": "Server Manager",
+    "icon": "assets/icon-large.ico",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -56,11 +60,46 @@
       {
         "from": "assets/",
         "to": "assets/",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
+    "asar": false,
     "win": {
-      "target": "dir"
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "publisherName": "Server Manager",
+      "verifyUpdateCodeSignature": false,
+      "signingHashAlgorithms": [
+        "sha1",
+        "sha256"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Server Manager",
+      "deleteAppDataOnUninstall": true,
+      "displayLanguageSelector": true
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
     },
     "linux": {
       "target": "dir"

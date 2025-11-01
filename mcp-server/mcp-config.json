@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "server-manager": {
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}

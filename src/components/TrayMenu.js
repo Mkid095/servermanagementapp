@@ -13,33 +13,33 @@ class TrayMenu {
 
   init() {
     const iconPath = path.join(__dirname, '..', '..', 'assets', 'icon.png');
-    
+
     try {
       // Try to load custom icon first
       this.tray = new Tray(iconPath);
       this.tray.setToolTip('Server Manager - Development Server Monitor');
-      
+
       // Set up initial menu
       this.updateMenu();
-      
+
       // Set up event handlers
       this.setupEventHandlers();
-      
+
       log.info('System tray initialized successfully');
     } catch (error) {
       log.warn('Failed to load custom icon, using default icon:', error.message);
-      
+
       try {
         // Create a simple tray without custom icon - Electron will use default
         this.tray = new Tray(nativeImage.createEmpty());
         this.tray.setToolTip('Server Manager - Development Server Monitor');
-        
+
         // Set up initial menu
         this.updateMenu();
-        
+
         // Set up event handlers
         this.setupEventHandlers();
-        
+
         log.info('System tray initialized with default icon');
       } catch (fallbackError) {
         log.error('Failed to initialize system tray completely:', fallbackError);
@@ -78,7 +78,7 @@ class TrayMenu {
 
     const template = this.buildMenuTemplate();
     const contextMenu = Menu.buildFromTemplate(template);
-    
+
     this.tray.setContextMenu(contextMenu);
   }
 
@@ -169,7 +169,7 @@ class TrayMenu {
     }
 
     template.push({ type: 'separator' });
-    
+
     // Quick actions
     template.push({
       label: 'Refresh Servers',
@@ -177,6 +177,16 @@ class TrayMenu {
         this.refreshServers();
       }
     });
+
+    // Add "Stop All Servers and Exit" if there are active servers
+    if (this.servers.length > 0) {
+      template.push({
+        label: `Stop All ${this.servers.length} Servers & Exit`,
+        click: () => {
+          this.stopAllServersAndExit();
+        }
+      });
+    }
 
     // Application control
     template.push({ type: 'separator' });
@@ -197,6 +207,114 @@ class TrayMenu {
       }
     } catch (error) {
       log.error('Error stopping server from tray:', error);
+    }
+  }
+
+  async stopAllServersAndExit() {
+    try {
+      log.info('User requested to stop all servers and exit application');
+
+      // Show confirmation dialog
+      const { dialog } = require('electron');
+
+      const safeServers = this.servers.filter(server =>
+      (server.isSafeToStop === true) ||
+      (server.isSafeToStop === undefined && server.importance === 'development')
+    );
+
+    const criticalServers = this.servers.length - safeServers.length;
+
+    const options = {
+        type: 'question',
+        buttons: ['Stop All & Exit', 'Cancel'],
+        defaultId: 0,
+        title: 'Stop All Servers & Exit',
+        message: `Stop all ${safeServers.length} development servers and exit Server Manager?`,
+        detail: criticalServers > 0 ?
+          `This will terminate ${safeServers.length} development servers and exclude ${criticalServers} critical/production servers.` :
+          `This will terminate all ${safeServers.length} detected development servers and then close the Server Manager application.`,
+        icon: path.join(__dirname, '..', '..', 'assets', 'icon.png')
+      };
+
+      const { response } = await dialog.showMessageBox(this.mainWindow, options);
+
+      if (response === 0) { // User clicked "Stop All & Exit"
+        log.info('User confirmed - proceeding to stop all servers and exit');
+
+        try {
+          // Direct call to processManager to stop all servers
+          const result = await this.serverManager.stopAllServersAndExit(this.servers);
+
+          if (result.success) {
+            log.info(`Servers stopped successfully: ${result.message}`);
+
+            // Show success dialog
+            await dialog.showMessageBox(this.mainWindow, {
+              type: 'info',
+              buttons: ['OK'],
+              defaultId: 0,
+              title: 'Servers Stopped',
+              message: 'All servers stopped successfully',
+              detail: result.message
+            });
+
+            // Wait a moment before exiting
+            setTimeout(() => {
+              this.isQuitting = true;
+              require('electron').app.quit();
+            }, 1000);
+
+          } else {
+            log.error(`Failed to stop some servers: ${result.error || 'Unknown error'}`);
+
+            // Show warning dialog with option to exit anyway
+            const warningResult = await dialog.showMessageBox(this.mainWindow, {
+              type: 'warning',
+              buttons: ['Exit Anyway', 'Cancel'],
+              defaultId: 1,
+              title: 'Server Stop Warning',
+              message: 'Some servers could not be stopped automatically',
+              detail: result.error || 'You can exit the application anyway, but some development servers may still be running.',
+            });
+
+            if (warningResult.response === 0) { // User clicked "Exit Anyway"
+              this.isQuitting = true;
+              require('electron').app.quit();
+            }
+          }
+        } catch (serverStopError) {
+          log.error('Error stopping servers:', serverStopError);
+
+          // Show error dialog with option to exit anyway
+          const errorResult = await dialog.showMessageBox(this.mainWindow, {
+            type: 'error',
+            buttons: ['Exit Anyway', 'Cancel'],
+            defaultId: 1,
+            title: 'Server Stop Error',
+            message: 'An error occurred while trying to stop servers',
+            detail: serverStopError.message + '\n\nYou can exit the application anyway.',
+          });
+
+          if (errorResult.response === 0) { // User clicked "Exit Anyway"
+            this.isQuitting = true;
+            require('electron').app.quit();
+          }
+        }
+      } else {
+        log.info('User cancelled the stop all servers and exit operation');
+      }
+    } catch (error) {
+      log.error('Error in stopAllServersAndExit:', error);
+
+      // Show error dialog
+      const { dialog } = require('electron');
+      await dialog.showMessageBox(this.mainWindow, {
+        type: 'error',
+        buttons: ['OK'],
+        title: 'Error',
+        message: 'An error occurred',
+        detail: error.message
+      });
     }
   }
 

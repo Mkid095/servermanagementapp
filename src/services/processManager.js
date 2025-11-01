@@ -1,27 +1,33 @@
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const fs = require('fs').promises;
+/**
+ * Process Manager Service
+ * Main coordinator for process management operations
+ * Refactored to use modular components
+ */
+
+const TerminationStrategies = require('./TerminationStrategies');
+const ProcessUtilities = require('./ProcessUtilities');
+const ProcessLogging = require('./ProcessLogging');
 const path = require('path');
 const log = require('electron-log');
-
-const execAsync = promisify(exec);
 
 class ProcessManager {
   constructor() {
     this.terminationTimeout = 10000; // 10 seconds timeout for graceful shutdown
     this.errorLogsDir = path.join(__dirname, '..', '..', 'logs');
-    this.initErrorLogs();
-  }
 
-  /**
-   * Initialize error logs directory
-   */
-  async initErrorLogs() {
-    try {
-      await fs.mkdir(this.errorLogsDir, { recursive: true });
-    } catch (error) {
-      log.warn('Could not create error logs directory:', error);
-    }
+    // Initialize modules
+    this.terminationStrategies = new TerminationStrategies(this.terminationTimeout);
+    this.processUtils = new ProcessUtilities();
+    this.logging = new ProcessLogging(this.errorLogsDir);
+
+    // Prepare dependencies for modules
+    this.dependencies = {
+      processUtils: this.processUtils,
+      mainProcessCheck: this.processUtils
+    };
+
+    // Initialize error logs
+    this.logging.initErrorLogs();
   }
 
   /**
@@ -31,50 +37,53 @@ class ProcessManager {
    */
   async stopServer(pid) {
     try {
-      log.info(`Attempting to stop server with PID: ${pid}`);
+      // Log the operation
+      await this.logging.logServerOperation(pid, 'stop', true, 'Attempting to stop server');
 
-      // First, verify the process exists
-      const processExists = await this.verifyProcessExists(pid);
-      if (!processExists) {
+      // ABSOLUTE SAFETY CHECK: Never attempt to stop system processes
+      const processInfo = await this.processUtils.getProcessInfo(pid);
+
+      // CRITICAL SYSTEM PROCESSES - ABSOLUTELY PROHIBITED
+      if (this.processUtils.isSystemProcess(pid)) {
+        const error = 'CRITICAL: This is a Windows system process and cannot be terminated for safety';
+        await this.logging.logServerOperation(pid, 'stop', false, error);
         return {
           success: false,
-          error: `Process with PID ${pid} not found`
+          error: error,
+          isProtected: true,
+          isSystemProtected: true
         };
       }
 
-      // Try graceful shutdown first
-      const gracefulResult = await this.attemptGracefulShutdown(pid);
-      if (gracefulResult.success) {
-        log.info(`Successfully stopped server with PID: ${pid} (graceful shutdown)`);
-        return gracefulResult;
+      // CRITICAL SERVER PROCESSES - USER CONFIRMATION REQUIRED
+      if (this.isCriticalServer(processInfo)) {
+        // TODO: Show user confirmation dialog for critical processes
+        const error = 'This appears to be a critical production server. Manual intervention required.';
+        await this.logging.logServerOperation(pid, 'stop', false, error);
+        return {
+          success: false,
+          error: error,
+          isProtected: true,
+          requiresManualIntervention: true
+        };
       }
 
-      // If graceful shutdown fails, try force termination
-      log.warn(`Graceful shutdown failed for PID ${pid}, attempting force termination`);
-      const forceResult = await this.forceTerminate(pid);
-      
-      if (forceResult.success) {
-        log.info(`Successfully stopped server with PID: ${pid} (force termination)`);
-        return forceResult;
-      }
+      const result = await this.terminationStrategies.stopServer(pid, this.dependencies);
 
-      // If force termination fails, try Node.js specific methods
-      log.warn(`Force termination failed for PID ${pid}, trying Node.js specific methods`);
-      const nodeResult = await this.terminateNodeProcess(pid);
-      
-      if (nodeResult.success) {
-        log.info(`Successfully stopped Node.js server with PID: ${pid} (Node.js specific method)`);
-        return nodeResult;
-      }
+      // Log the result
+      await this.logging.logServerOperation(
+        pid,
+        'stop',
+        result.success,
+        result.success ? 'Server stopped successfully' : result.error
+      );
 
-      // If all methods fail, return the last error
-      return {
-        success: false,
-        error: `Process could not be terminated with any method. Last error: ${nodeResult.error}`
-      };
+      return result;
 
     } catch (error) {
       log.error(`Error stopping server with PID ${pid}:`, error);
+      await this.logging.logServerOperation(pid, 'stop', false, error.message);
+
       return {
         success: false,
         error: error.message || 'Unknown error occurred while stopping server'
@@ -88,84 +97,7 @@ class ProcessManager {
    * @returns {Promise<Object>} Result object
    */
   async terminateNodeProcess(pid) {
-    try {
-      log.info(`Using enhanced Node.js termination for PID: ${pid}`);
-      
-      // Get process details first
-      const processInfo = await this.getProcessInfo(pid);
-      
-      // Try Node.js specific termination methods
-      const nodeMethods = [
-        // Send SIGINT to Node.js process
-        `taskkill /PID ${pid} /SIGINT`,
-        // Force terminate Node.js specifically
-        `taskkill /F /PID ${pid} /T`,
-        // Kill all Node.js processes from the same command line
-        `wmic process where "ProcessId=${pid} and Name='node.exe'" call terminate`,
-        // Use PowerShell for more control
-        `powershell -Command "Stop-Process -Id ${pid} -Force"`
-      ];
-
-      for (const method of nodeMethods) {
-        try {
-          await execAsync(method);
-          await this.sleep(2000);
-          
-          const stillRunning = await this.verifyProcessExists(pid);
-          if (!stillRunning) {
-            return {
-              success: true,
-              method: 'node-specific',
-              message: `Node.js process terminated using: ${method}`
-            };
-          }
-        } catch (methodError) {
-          log.debug(`Node.js method ${method} failed:`, methodError.message);
-          continue;
-        }
-      }
-
-      return {
-        success: false,
-        method: 'node-specific',
-        error: 'Node.js process could not be terminated'
-      };
-
-    } catch (error) {
-      log.error(`Error in Node.js termination for PID ${pid}:`, error);
-      return {
-        success: false,
-        error: error.message
-      };
-    }
-  }
-
-  /**
-   * Get detailed process information
-   * @param {number} pid - Process ID
-   * @returns {Promise<Object>} Process information
-   */
-  async getProcessInfo(pid) {
-    try {
-      const { stdout } = await execAsync(`wmic process where ProcessId=${pid} get Name,CommandLine,ExecutablePath /format:list`);
-      return stdout;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  /**
-   * Verify if a process exists
-   * @param {number} pid - Process ID
-   * @returns {Promise<boolean>} True if process exists
-   */
-  async verifyProcessExists(pid) {
-    try {
-      const { stdout } = await execAsync(`tasklist /fi "PID eq ${pid}" /fo csv /nh`);
-      return stdout.trim().length > 0;
-    } catch (error) {
-      return false;
-    }
+    return await this.terminationStrategies.terminateNodeProcess(pid, this.dependencies);
   }
 
   /**
@@ -174,50 +106,7 @@ class ProcessManager {
    * @returns {Promise<Object>} Result object
    */
   async attemptGracefulShutdown(pid) {
-    try {
-      // Try multiple graceful shutdown methods
-      const methods = [
-        // Method 1: Standard taskkill (graceful)
-        `taskkill /PID ${pid}`,
-        // Method 2: Send WM_CLOSE message
-        `taskkill /PID ${pid} /IM`,
-        // Method 3: Node.js specific graceful shutdown
-        `taskkill /PID ${pid} /T`
-      ];
-
-      for (const method of methods) {
-        try {
-          await execAsync(method);
-          await this.sleep(1500);
-          
-          const stillRunning = await this.verifyProcessExists(pid);
-          if (!stillRunning) {
-            return {
-              success: true,
-              method: 'graceful',
-              message: `Process terminated gracefully using: ${method}`
-            };
-          }
-        } catch (methodError) {
-          log.debug(`Graceful method ${method} failed for PID ${pid}:`, methodError.message);
-          continue;
-        }
-      }
-
-      return {
-        success: false,
-        method: 'graceful',
-        error: 'All graceful shutdown methods failed'
-      };
-
-    } catch (error) {
-      log.warn(`Graceful shutdown failed for PID ${pid}:`, error.message);
-      return {
-        success: false,
-        method: 'graceful',
-        error: error.message
-      };
-    }
+    return await this.terminationStrategies.attemptGracefulShutdown(pid, this.dependencies);
   }
 
   /**
@@ -226,53 +115,7 @@ class ProcessManager {
    * @returns {Promise<Object>} Result object
    */
   async forceTerminate(pid) {
-    try {
-      // Try multiple force termination methods in order of aggression
-      const forceMethods = [
-        // Method 1: Standard force termination
-        `taskkill /F /PID ${pid}`,
-        // Method 2: Force terminate with tree (kill child processes too)
-        `taskkill /F /PID ${pid} /T`,
-        // Method 3: Force terminate by image name if PID fails
-        `taskkill /F /IM node.exe`,
-        // Method 4: Most aggressive - system level termination
-        `wmic process where ProcessId=${pid} call terminate`
-      ];
-
-      for (const method of forceMethods) {
-        try {
-          log.info(`Trying force termination method: ${method}`);
-          await execAsync(method);
-          await this.sleep(2000);
-          
-          const stillRunning = await this.verifyProcessExists(pid);
-          if (!stillRunning) {
-            return {
-              success: true,
-              method: 'force',
-              message: `Process force terminated using: ${method}`
-            };
-          }
-        } catch (methodError) {
-          log.debug(`Force method ${method} failed for PID ${pid}:`, methodError.message);
-          continue;
-        }
-      }
-
-      return {
-        success: false,
-        method: 'force',
-        error: 'Process could not be terminated'
-      };
-
-    } catch (error) {
-      log.error(`Force termination failed for PID ${pid}:`, error.message);
-      return {
-        success: false,
-        method: 'force',
-        error: error.message
-      };
-    }
+    return await this.terminationStrategies.forceTerminate(pid, this.dependencies);
   }
 
   /**
@@ -281,24 +124,110 @@ class ProcessManager {
    * @returns {Promise<Object>} Result object with individual results
    */
   async stopMultipleServers(pids) {
-    const results = {};
-    
-    for (const pid of pids) {
-      results[pid] = await this.stopServer(pid);
+    return await this.terminationStrategies.stopMultipleServers(pids, this.dependencies);
+  }
+
+  /**
+   * Stop all detected servers and prepare for application exit
+   * @param {Array<Object>} servers - Array of server objects with pid property
+   * @returns {Promise<Object>} Result object with success status and details
+   */
+  async stopAllServersAndExit(servers) {
+    try {
+      if (!servers || servers.length === 0) {
+        return {
+          success: true,
+          message: 'No servers to stop',
+          stoppedCount: 0,
+          failedCount: 0,
+          results: {}
+        };
+      }
+
+      // Filter out servers that are not safe to stop (protect critical servers)
+      const safeToStopServers = servers.filter(server => {
+        // Include server if it's explicitly marked as safe to stop
+        if (server.isSafeToStop === true) {
+          return true;
+        }
+
+        // Include server if it doesn't have the safety flag but appears to be development server
+        if (server.isSafeToStop === undefined && server.importance === 'development') {
+          return true;
+        }
+
+        // Exclude servers marked as critical or production
+        return false;
+      });
+
+      const excludedServers = servers.length - safeToStopServers.length;
+
+      if (excludedServers > 0) {
+        log.warn(`Excluding ${excludedServers} servers that are critical/production servers from automatic termination`);
+      }
+
+      // Extract PIDs from safe servers
+      const pids = safeToStopServers.map(server => server.pid).filter(pid => pid && pid > 0);
+
+      if (pids.length === 0) {
+        return {
+          success: true,
+          message: excludedServers > 0 ?
+            `Excluded ${excludedServers} critical servers. No safe servers to stop.` :
+            'No safe servers to stop.',
+          stoppedCount: 0,
+          failedCount: 0,
+          excludedCount: excludedServers,
+          results: {}
+        };
+      }
+
+      log.info(`Attempting to stop ${pids.length} safe-to-stop servers before application exit (excluded ${excludedServers} critical servers)`);
+
+      // Stop all safe servers using existing stopMultipleServers method
+      const result = await this.stopMultipleServers(pids);
+
+      // Log the operation
+      await this.logging.logServerOperation(
+        0, // Use 0 to indicate all servers
+        'stop-all-and-exit',
+        result.failed === 0, // Success depends on all safe servers being stopped
+        result.failed === 0 ?
+          `Successfully stopped ${result.successful} of ${safeToStopServers.length} safe servers. Excluded ${excludedServers} critical servers.` :
+          `Failed to stop ${result.failed} of ${safeToStopServers.length} safe servers. Excluded ${excludedServers} critical servers.`
+      );
+
+      return {
+        success: result.failed === 0,
+        message: `Stopped ${result.successful} of ${safeToStopServers.length} safe servers. ${excludedServers > 0 ? `Excluded ${excludedServers} critical servers.` : ''}`,
+        stoppedCount: result.successful,
+        failedCount: result.failed,
+        excludedCount: excludedServers,
+        results: result.results,
+        safeServersStopped: result.successful,
+        criticalServersExcluded: excludedServers
+      };
+
+    } catch (error) {
+      log.error('Error stopping all servers:', error);
+
+      // Log error
+      await this.logging.logServerOperation(
+        0, // Use 0 to indicate all servers
+        'stop-all-and-exit',
+        false,
+        error.message
+      );
+
+      return {
+        success: false,
+        error: error.message || 'Unknown error occurred while stopping servers',
+        stoppedCount: 0,
+        failedCount: servers ? servers.length : 0,
+        excludedCount: 0,
+        results: {}
+      };
     }
-
-    const successful = Object.values(results).filter(r => r.success).length;
-    const failed = Object.values(results).filter(r => !r.success).length;
-
-    log.info(`Stopped ${successful} servers successfully, ${failed} failed`);
-
-    return {
-      success: failed === 0,
-      total: pids.length,
-      successful,
-      failed,
-      results
-    };
   }
 
   /**
@@ -307,64 +236,7 @@ class ProcessManager {
    * @returns {Promise<Object>} Process information
    */
   async getProcessTree(pid) {
-    try {
-      // Get process details
-      const { stdout } = await execAsync(`wmic process where "ProcessId=${pid}" get Name,ProcessId,ParentProcessId,CommandLine /format:csv`);
-      
-      const lines = stdout.split('\n').filter(line => line.trim());
-      if (lines.length < 2) return null;
-
-      // Parse the main process
-      const mainProcess = this.parseWmicLine(lines[1]);
-      
-      // Get child processes
-      const { stdout: childStdout } = await execAsync(`wmic process where "ParentProcessId=${pid}" get ProcessId,Name /format:csv`);
-      const childLines = childStdout.split('\n').filter(line => line.trim());
-      
-      const children = [];
-      for (let i = 1; i < childLines.length; i++) {
-        const child = this.parseWmicLine(childLines[i]);
-        if (child && child.ProcessId) {
-          children.push({
-            pid: parseInt(child.ProcessId),
-            name: child.Name || 'Unknown'
-          });
-        }
-      }
-
-      return {
-        pid: parseInt(mainProcess.ProcessId),
-        name: mainProcess.Name || 'Unknown',
-        commandLine: mainProcess.CommandLine || '',
-        parentPid: mainProcess.ParentProcessId ? parseInt(mainProcess.ParentProcessId) : null,
-        children
-      };
-
-    } catch (error) {
-      log.error(`Error getting process tree for PID ${pid}:`, error);
-      return null;
-    }
-  }
-
-  /**
-   * Parse WMIC CSV output line
-   * @param {string} line - CSV line
-   * @returns {Object} Parsed object
-   */
-  parseWmicLine(line) {
-    const parts = line.split(',');
-    const result = {};
-    
-    // The first line contains headers, but we'll map by position for simplicity
-    if (parts.length >= 4) {
-      result.Node = parts[0];
-      result.Name = parts[1];
-      result.ProcessId = parts[2];
-      result.ParentProcessId = parts[3];
-      result.CommandLine = parts.slice(4).join(',');
-    }
-    
-    return result;
+    return await this.processUtils.getProcessTree(pid);
   }
 
   /**
@@ -373,40 +245,7 @@ class ProcessManager {
    * @returns {Promise<boolean>} True if it's a development server
    */
   async isDevelopmentServer(pid) {
-    try {
-      const { stdout } = await execAsync(`wmic process where "ProcessId=${pid}" get CommandLine /format:csv`);
-      
-      const lines = stdout.split('\n').filter(line => line.trim());
-      if (lines.length < 2) return false;
-
-      const commandLine = lines[1].split(',').slice(4).join(',').toLowerCase();
-      
-      // Check for development server indicators
-      const devServerIndicators = [
-        'node_modules',
-        'react-scripts',
-        'next',
-        'nuxt',
-        'vite',
-        'webpack',
-        'nodemon',
-        'ts-node',
-        'dev-server',
-        'localhost',
-        '127.0.0.1',
-        '--port',
-        '-p',
-        'start',
-        'dev',
-        'serve'
-      ];
-
-      return devServerIndicators.some(indicator => commandLine.includes(indicator));
-
-    } catch (error) {
-      log.error(`Error checking if PID ${pid} is development server:`, error);
-      return false;
-    }
+    return await this.processUtils.isDevelopmentServer(pid);
   }
 
   /**
@@ -415,24 +254,7 @@ class ProcessManager {
    * @returns {Promise<Object>} Resource usage information
    */
   async getProcessResources(pid) {
-    try {
-      const { stdout } = await execAsync(`wmic process where "ProcessId=${pid}" get WorkingSetSize,UserModeTime,KernelModeTime /format:csv`);
-      
-      const lines = stdout.split('\n').filter(line => line.trim());
-      if (lines.length < 2) return null;
-
-      const parts = lines[1].split(',');
-      
-      return {
-        memoryUsage: parts[1] ? parseInt(parts[1]) / 1024 / 1024 : 0, // Convert to MB
-        userTime: parts[2] ? parseInt(parts[2]) : 0,
-        kernelTime: parts[3] ? parseInt(parts[3]) : 0
-      };
-
-    } catch (error) {
-      log.error(`Error getting resources for PID ${pid}:`, error);
-      return null;
-    }
+    return await this.processUtils.getProcessResources(pid);
   }
 
   /**
@@ -442,43 +264,25 @@ class ProcessManager {
    */
   async restartServer(pid) {
     try {
-      log.info(`Attempting to restart server with PID: ${pid}`);
+      // Log the operation
+      await this.logging.logServerOperation(pid, 'restart', true, 'Attempting to restart server');
 
-      // Get process information before stopping
-      const processInfo = await this.getProcessTree(pid);
-      if (!processInfo) {
-        return {
-          success: false,
-          error: `Process with PID ${pid} not found`
-        };
-      }
+      const result = await this.terminationStrategies.restartServer(pid, this.dependencies);
 
-      const commandLine = processInfo.commandLine;
-      const workingDir = await this.getProcessWorkingDirectory(pid);
+      // Log the result
+      await this.logging.logServerOperation(
+        pid,
+        'restart',
+        result.success,
+        result.success ? `Server restarted successfully. New PID: ${result.newPid}` : result.error
+      );
 
-      // Stop the server
-      const stopResult = await this.stopServer(pid);
-      if (!stopResult.success) {
-        return {
-          success: false,
-          error: `Failed to stop server: ${stopResult.error}`
-        };
-      }
-
-      // Wait a moment before restarting
-      await this.sleep(2000);
-
-      // Restart the server
-      const restartResult = await this.startServer(commandLine, workingDir);
-      
-      if (restartResult.success) {
-        log.info(`Successfully restarted server. New PID: ${restartResult.newPid}`);
-      }
-
-      return restartResult;
+      return result;
 
     } catch (error) {
       log.error(`Error restarting server with PID ${pid}:`, error);
+      await this.logging.logServerOperation(pid, 'restart', false, error.message);
+
       return {
         success: false,
         error: error.message || 'Unknown error occurred while restarting server'
@@ -493,43 +297,7 @@ class ProcessManager {
    * @returns {Promise<Object>} Result object with new PID
    */
   async startServer(commandLine, workingDir = null) {
-    try {
-      const { exec } = require('child_process');
-      
-      return new Promise((resolve, reject) => {
-        const child = exec(commandLine, {
-          cwd: workingDir || process.cwd(),
-          detached: true,
-          stdio: 'ignore'
-        });
-
-        child.unref();
-        
-        // Give the process a moment to start
-        setTimeout(() => {
-          if (child.pid) {
-            resolve({
-              success: true,
-              newPid: child.pid,
-              message: 'Server restarted successfully'
-            });
-          } else {
-            reject(new Error('Failed to start server process'));
-          }
-        }, 1000);
-
-        child.on('error', (error) => {
-          reject(error);
-        });
-      });
-
-    } catch (error) {
-      log.error('Error starting server:', error);
-      return {
-        success: false,
-        error: error.message
-      };
-    }
+    return await this.terminationStrategies.startServer(commandLine, workingDir, this.dependencies);
   }
 
   /**
@@ -538,23 +306,7 @@ class ProcessManager {
    * @returns {Promise<string>} Working directory
    */
   async getProcessWorkingDirectory(pid) {
-    try {
-      const { stdout } = await execAsync(`wmic process where "ProcessId=${pid}" get ExecutablePath /format:csv`);
-      
-      const lines = stdout.split('\n').filter(line => line.trim());
-      if (lines.length < 2) return null;
-
-      const executablePath = lines[1].split(',')[1];
-      if (executablePath) {
-        return path.dirname(executablePath);
-      }
-
-      return null;
-
-    } catch (error) {
-      log.error(`Error getting working directory for PID ${pid}:`, error);
-      return null;
-    }
+    return await this.processUtils.getProcessWorkingDirectory(pid);
   }
 
   /**
@@ -563,45 +315,7 @@ class ProcessManager {
    * @returns {Promise<Object>} Error logs information
    */
   async getServerErrorLogs(pid) {
-    try {
-      const logFile = path.join(this.errorLogsDir, `server_${pid}_errors.log`);
-      
-      // Check if log file exists
-      try {
-        await fs.access(logFile);
-      } catch {
-        return {
-          success: true,
-          logs: [],
-          message: 'No error logs found for this server'
-        };
-      }
-
-      // Read log file
-      const content = await fs.readFile(logFile, 'utf8');
-      const logs = content.split('\n')
-        .filter(line => line.trim())
-        .map(line => {
-          try {
-            return JSON.parse(line);
-          } catch {
-            return { timestamp: new Date().toISOString(), message: line, level: 'info' };
-          }
-        });
-
-      return {
-        success: true,
-        logs: logs.slice(-50), // Return last 50 log entries
-        totalLogs: logs.length
-      };
-
-    } catch (error) {
-      log.error(`Error getting error logs for PID ${pid}:`, error);
-      return {
-        success: false,
-        error: error.message
-      };
-    }
+    return await this.logging.getServerErrorLogs(pid);
   }
 
   /**
@@ -611,23 +325,7 @@ class ProcessManager {
    * @param {string} level - Log level (error, warn, info)
    */
   async logServerError(pid, message, level = 'error') {
-    try {
-      const logFile = path.join(this.errorLogsDir, `server_${pid}_errors.log`);
-      const logEntry = {
-        timestamp: new Date().toISOString(),
-        pid: pid,
-        level: level,
-        message: message
-      };
-
-      await fs.appendFile(logFile, JSON.stringify(logEntry) + '\n');
-      
-      // Also log to electron-log
-      log[level](`Server PID ${pid}: ${message}`);
-
-    } catch (error) {
-      log.error(`Error logging server error for PID ${pid}:`, error);
-    }
+    await this.logging.logServerError(pid, message, level);
   }
 
   /**
@@ -636,29 +334,7 @@ class ProcessManager {
    * @returns {Promise<Object>} Result object
    */
   async clearServerErrorLogs(pid) {
-    try {
-      const logFile = path.join(this.errorLogsDir, `server_${pid}_errors.log`);
-      
-      try {
-        await fs.unlink(logFile);
-        return {
-          success: true,
-          message: 'Error logs cleared successfully'
-        };
-      } catch {
-        return {
-          success: true,
-          message: 'No error logs to clear'
-        };
-      }
-
-    } catch (error) {
-      log.error(`Error clearing error logs for PID ${pid}:`, error);
-      return {
-        success: false,
-        error: error.message
-      };
-    }
+    return await this.logging.clearServerErrorLogs(pid);
   }
 
   /**
@@ -667,38 +343,170 @@ class ProcessManager {
    * @param {string} serverName - Server name for logging
    */
   async monitorServerErrors(pid, serverName) {
-    try {
-      // Check if process is still running
-      const isRunning = await this.verifyProcessExists(pid);
-      if (!isRunning) {
-        await this.logServerError(pid, `Server "${serverName}" has stopped unexpectedly`, 'warn');
-        return;
-      }
-
-      // Get process resources
-      const resources = await this.getProcessResources(pid);
-      if (resources) {
-        // Log high memory usage
-        if (resources.memoryUsage > 1000) { // More than 1GB
-          await this.logServerError(pid, `High memory usage detected: ${resources.memoryUsage.toFixed(2)} MB`, 'warn');
-        }
-      }
-
-      // Continue monitoring
-      setTimeout(() => this.monitorServerErrors(pid, serverName), 30000); // Check every 30 seconds
-
-    } catch (error) {
-      log.error(`Error monitoring server ${pid}:`, error);
-    }
+    await this.logging.monitorServerErrors(pid, serverName, this.processUtils);
   }
 
   /**
-   * Sleep helper function
+   * Check if a process is the main Electron application process
+   * @param {number} pid - Process ID
+   * @returns {Promise<boolean>} True if this is the main process
+   */
+  async isMainProcess(pid) {
+    return await this.processUtils.isMainProcess(pid);
+  }
+
+  /**
+   * Sanitize sensitive information from process command line
+   * @param {string} commandLine - Original command line
+   * @returns {string} Sanitized command line
+   */
+  sanitizeCommandLine(commandLine) {
+    return this.processUtils.sanitizeCommandLine(commandLine);
+  }
+
+  /**
+   * Get process details for a specific PID
+   * @param {number} pid - Process ID
+   * @returns {Promise<Object>} Process details
+   */
+  async getProcessDetails(pid) {
+    return await this.processUtils.getProcessDetails(pid);
+  }
+
+  /**
+   * Get server operation history
+   * @param {number} limit - Maximum number of entries to return
+   * @returns {Promise<Array>} Operation history
+   */
+  async getOperationHistory(limit = 100) {
+    return await this.logging.getOperationHistory(limit);
+  }
+
+  /**
+   * Get all server error logs summary
+   * @returns {Promise<Object>} Summary of all error logs
+   */
+  async getAllErrorLogsSummary() {
+    return await this.logging.getAllErrorLogsSummary();
+  }
+
+  /**
+   * Clean up old log files
+   * @param {number} daysToKeep - Number of days to keep logs
+   * @returns {Promise<Object>} Cleanup result
+   */
+  async cleanupOldLogs(daysToKeep = 30) {
+    return await this.logging.cleanupOldLogs(daysToKeep);
+  }
+
+  /**
+   * Export logs to a single file
+   * @param {string} outputPath - Output file path
+   * @returns {Promise<Object>} Export result
+   */
+  async exportLogs(outputPath) {
+    return await this.logging.exportLogs(outputPath);
+  }
+
+  /**
+   * Get process memory usage details
+   * @param {number} pid - Process ID
+   * @returns {Promise<Object>} Memory usage details
+   */
+  async getProcessMemoryInfo(pid) {
+    return await this.processUtils.getProcessMemoryInfo(pid);
+  }
+
+  /**
+   * Get process environment variables
+   * @param {number} pid - Process ID
+   * @returns {Promise<Object>} Environment variables
+   */
+  async getProcessEnvironment(pid) {
+    return await this.processUtils.getProcessEnvironment(pid);
+  }
+
+  /**
+   * Sleep helper function (delegated to termination strategies)
    * @param {number} ms - Milliseconds to sleep
    * @returns {Promise<void>}
    */
   sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return this.terminationStrategies.sleep(ms);
+  }
+
+  /**
+   * Check if a server is critical and should NOT be stopped automatically
+   * @param {string} processInfo - Process information string
+   * @returns {boolean} True if this is a critical server
+   */
+  isCriticalServer(processInfo) {
+    if (!processInfo) return false;
+
+    const info = processInfo.toLowerCase();
+
+    // Critical server patterns that should NEVER be stopped
+    const criticalPatterns = [
+      // Database servers
+      /postgresql/i,
+      /mysql/i,
+      /mongodb/i,
+      /redis/i,
+      /oracle/i,
+
+      // Web servers and proxies
+      /apache/i,
+      /nginx/i,
+      /iis/i,
+      /tomcat/i,
+      /jetty/i,
+      /haproxy/i,
+
+      // System services
+      /systemd/i,
+      /service/i,
+      /daemon/i,
+
+      // Security applications
+      /antivirus/i,
+      /security/i,
+      /firewall/i,
+
+      // Production indicators
+      /production/i,
+      /prod/i,
+      /cluster/i,
+      /master.*process/i,
+      /worker.*process/i,
+
+      // Backup and monitoring
+      /backup/i,
+      /monitor/i,
+      /log.*agent/i,
+
+      // PM2 process management
+      /pm2/i,
+      /forever/i,
+
+      // Mail servers
+      /mail/i,
+      /smtp/i,
+      /postfix/i,
+
+      // Other system processes
+      /windows/i,
+      /system32/i,
+      /program files/i
+    ];
+
+    // Check for critical patterns
+    for (const pattern of criticalPatterns) {
+      if (pattern.test(info)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 }
 

@@ -19,11 +19,15 @@ jest.mock('electron', () => ({
   },
   ipcMain: {
     on: jest.fn()
+  },
+  nativeImage: {
+    createEmpty: jest.fn(() => ({}))
   }
 }));
 
 jest.mock('electron-log', () => ({
   info: jest.fn(),
+  warn: jest.fn(),
   error: jest.fn()
 }));
 
@@ -75,15 +79,23 @@ describe('TrayMenu', () => {
 
     it('should handle tray initialization error gracefully', () => {
       // Create a fresh instance for this test
+
+      // Mock first Tray call to fail, but second to succeed
       Tray.mockImplementationOnce(() => {
         throw new Error('Tray creation failed');
-      });
+      }).mockImplementationOnce(() => ({
+        setToolTip: jest.fn(),
+        setContextMenu: jest.fn(),
+        on: jest.fn(),
+        destroy: jest.fn()
+      }));
 
       const log = require('electron-log');
       const errorTrayMenu = new TrayMenu(mockMainWindow, mockServerManager);
-      
+
+      // The init() should not throw when the second attempt succeeds
       expect(() => errorTrayMenu.init()).not.toThrow();
-      expect(log.error).toHaveBeenCalledWith('Failed to initialize system tray:', expect.any(Error));
+      expect(log.warn).toHaveBeenCalledWith('Failed to load custom icon, using default icon:', 'Tray creation failed');
     });
   });
 
